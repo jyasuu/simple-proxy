@@ -1,0 +1,13 @@
+[package]
+name = "proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+pingora = { version = "0.8", features = ["lb", "proxy"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+lto = true

@@ -1,0 +1,10 @@
+[server]
+listen = "127.0.0.1:8080"
+
+[upstream]
+host = "origin.example.com"
+port = 8080
+tls = false
+# Optional: forward the value of this client header to the upstream as
+# the `Authorization` header. Leave unset to pass Authorization through as-is.
+auth_header = "X-Upstream-Authorization"
