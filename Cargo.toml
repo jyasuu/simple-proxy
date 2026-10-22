@@ -5,8 +5,11 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1"
-pingora = { version = "0.8", features = ["lb", "proxy"] }
+bytes = "1"
+chrono = "0.4"
+pingora = { version = "0.8", features = ["lb", "proxy", "openssl"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
 
 [profile.release]

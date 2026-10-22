@@ -1,0 +1,12 @@
+[server]
+listen = "127.0.0.1:8181"
+
+[upstream]
+host = "opencode.ai"
+port = 443
+tls = true
+# Leave unset: the client's own Authorization header passes through unchanged.
+
+[dump]
+file = "/tmp/opencode/zen-dump.jsonl"
+max_body_bytes = 1048576
