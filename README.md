@@ -3,6 +3,9 @@
 A minimal [Pingora](https://github.com/cloudflare/pingora) HTTP reverse proxy that
 forwards all requests to a single configured upstream.
 
+Also in this repo: [OPENCODE_API_RESEARCH.md](./OPENCODE_API_RESEARCH.md) — notes
+on the OpenCode Zen API, and `research/` — the probe scripts behind those notes.
+
 ## Build
 
 Requires Rust (tested with 1.94) and a C toolchain.

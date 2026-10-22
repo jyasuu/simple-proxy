@@ -363,6 +363,11 @@ disk, so treat the dump file as sensitive.
 
 ## 7. Reproducing the findings
 
+The two scripts behind this section are also checked in under
+[`research/`](./research).
+
+### 7.1 One-off checks
+
 ```sh
 # model catalog
 curl -s https://opencode.ai/zen/v1/models | jq '.data[].id'
@@ -377,6 +382,215 @@ curl -s http://127.0.0.1:8181/zen/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"big-pickle","messages":[{"role":"user","content":"hi"}]}'
 jq -c 'select(.kind=="request") | {uri, body_bytes}' /tmp/opencode/zen-dump.jsonl
+```
+
+### 7.2 Probing the session-id shape
+
+`research/probe-session-id.py` sends the captured agent body with a varying
+`x-session-id` and prints the status code of each probe — the matrix behind
+[3.2](#32-what-the-gateway-actually-checks).
+
+```python
+#!/usr/bin/env python3
+"""Probe the Zen free-tier gate with different x-session-id shapes.
+
+Every request uses the real agent body captured by the proxy in this repo,
+so the only variable is the session id (or the missing header).
+
+Usage:
+    probe-session-id.py [dump-file]
+
+The dump file is produced by the proxy (see conf-zen.toml); the first record
+in it is the title-generator request, which the gateway accepts.
+"""
+import json
+import secrets
+import string
+import subprocess
+import sys
+import time
+
+DUMP = sys.argv[1] if len(sys.argv) > 1 else "/tmp/opencode/zen-dump.jsonl"
+URL = "https://opencode.ai/zen/v1/chat/completions"
+UA = "opencode/latest/2.1.2/cli"
+B62 = string.digits + string.ascii_uppercase + string.ascii_lowercase
+
+records = [json.loads(line) for line in open(DUMP)]
+body = json.dumps(json.loads(records[0]["body"]))
+real_id = records[0]["headers"]["x-session-id"]
+
+
+def status(session_id=None, payload=body):
+    """Return the HTTP status code of a probe request."""
+    cmd = [
+        "curl", "-sS", "-m", "90", "--compressed", "-o", "/dev/null",
+        "-w", "%{http_code}", URL,
+        "-H", "content-type: application/json",
+        "-H", f"user-agent: {UA}",
+    ]
+    if session_id:
+        cmd += ["-H", f"x-session-id: {session_id}"]
+    cmd += ["-d", payload]
+    return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+
+
+def prefix(now_ms, counter=1):
+    """The 12 hex characters a real opencode session id starts with."""
+    a = ~(now_ms * 0x1000 + counter)
+    return "".join(f"{(a >> (40 - 8 * h)) & 0xff:02x}" for h in range(6))
+
+
+def tail(count=14):
+    """The 14 random base62 characters of a session id."""
+    return "".join(secrets.choice(B62) for _ in range(count))
+
+
+now = int(time.time() * 1000)
+cases = [
+    ("real captured id", real_id),
+    ("no x-session-id header", None),
+    ("ses_ + 12 hex + 14 base62", "ses_" + prefix(now) + tail()),
+    ("ses_ + 12 hex + 14 base62, ts = 1970", "ses_" + "0" * 12 + tail()),
+    ("ses_ + 12 hex + 14 base62, ts = +1 day", "ses_" + prefix(now + 86_400_000) + tail()),
+    ("ses_ + 12 hex + 13 base62 (len 25)", "ses_" + prefix(now) + tail(13)),
+    ("ses_ + 12 hex + 15 base62 (len 27)", "ses_" + prefix(now) + tail(15)),
+    ("ses_ + 12 hex + 12 base62 (len 24)", "ses_" + prefix(now) + tail(12)),
+    ("ses_ + 12 hex only (len 12)", "ses_" + prefix(now)),
+    ("ses_ + 12 hex, 'g' at index 0", "ses_g" + prefix(now)[1:] + tail()),
+    ("ses_ + 12 hex, 'z' at index 11", "ses_" + prefix(now)[:11] + "z" + tail()),
+    ("ses_ + UPPERCASE hex", "ses_" + prefix(now).upper() + tail()),
+    ("ses_ + 26 random base62", "ses_" + tail(26)),
+    ("ses_ + 26 base62, '-' in the tail", "ses_" + prefix(now) + tail(13) + "-"),
+    ("no ses_ prefix", prefix(now) + tail()),
+]
+
+print(f"{'case':40s} {'x-session-id':36s} HTTP")
+for label, session_id in cases:
+    print(f"{label:40s} {str(session_id)[:34]:36s} {status(session_id)}")
+
+print()
+print("body checks (session id is the real captured one):")
+print("  trivial body                  ", status(real_id, json.dumps(
+    {"model": "big-pickle", "messages": [{"role": "user", "content": "hi"}]})))
+print("  real body, stream false       ", status(real_id, json.dumps(
+    {**json.loads(records[0]["body"]), "stream": False})))
+print("  real body, stream true        ", status(real_id))
+```
+
+Output:
+
+```
+case                                     x-session-id                         HTTP
+real captured id                         ses_e9c7d592dffeHPXjUnMnnCHUTh       200
+no x-session-id header                   None                                 403
+ses_ + 12 hex + 14 base62                ses_e9c45aaddffe07m0GhCXj02Prc       200
+ses_ + 12 hex + 14 base62, ts = 1970     ses_0000000000007Yr2XIfthuPVdS       200
+ses_ + 12 hex + 14 base62, ts = +1 day   ses_e971f4eddffe4thkH6ljDQkTXX       200
+ses_ + 12 hex + 13 base62 (len 25)       ses_e9c45aaddffeJiNaadrId7bVr        403
+ses_ + 12 hex + 15 base62 (len 27)       ses_e9c45aaddffem79kIkoUclzaZRP      403
+ses_ + 12 hex + 12 base62 (len 24)       ses_e9c45aaddffer1p5LD6bXjeV         403
+ses_ + 12 hex only (len 12)              ses_e9c45aaddffe                     403
+ses_ + 12 hex, 'g' at index 0            ses_g9c45aaddffevKs7XzvnW2OHP5       403
+ses_ + 12 hex, 'z' at index 11           ses_e9c45aaddffze2blbylBgnAM8w       403
+ses_ + UPPERCASE hex                     ses_E9C45AADDFFEIsv07nnNtneROj       403
+ses_ + 26 random base62                  ses_lDjOzeC9lyMoeTJYD7m92bemBi       403
+ses_ + 26 base62, '-' in the tail        ses_e9c45aaddffeUfUjeuPDZl10p-       403
+no ses_ prefix                           e9c45aaddffeXPkyqKVSiV17AR           403
+
+body checks (session id is the real captured one):
+  trivial body                   403
+  real body, stream false        403
+  real body, stream true         200
+```
+
+### 7.3 Verifying the client-side id format
+
+`research/verify-session-id.py` ports the generator found in the binary and
+checks every session id in the local store against it — the evidence behind
+[3.1](#31-the-session-id-is-generated-by-the-client).
+
+```python
+#!/usr/bin/env python3
+"""Verify the opencode session-id format against the local session store.
+
+Ports the id generator found in the opencode binary (chunk-wy9a8t00.js) and
+checks every session id in ~/.local/share/opencode/opencode.db:
+
+  * the id matches ses_[0-9a-f]{12}[0-9A-Za-z]{14}
+  * the 12 hex characters are the inverted, big-endian 6-byte encoding of
+    Date.now() * 0x1000 + counter
+  * the timestamp recovered from the prefix matches the stored creation time
+
+Usage:
+    verify-session-id.py [db-path]
+"""
+import re
+import sqlite3
+import sys
+
+DB = sys.argv[1] if len(sys.argv) > 1 else "/root/.local/share/opencode/opencode.db"
+SHAPE = re.compile(r"^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$")
+
+
+def prefix_of(now_ms, counter=1, invert=True):
+    """Port of QZ() from the opencode binary: the 12 hex characters."""
+    r = now_ms * 0x1000 + counter
+    a = ~r if invert else r
+    return "".join(f"{(a >> (40 - 8 * h)) & 0xff:02x}" for h in range(6))
+
+
+def decode(session_id):
+    """Recover the creation time (ms, modulo 2**36) from a session id."""
+    inverted = bytes.fromhex(session_id[4:16])
+    raw = bytes((~byte) & 0xFF for byte in inverted)
+    return int.from_bytes(raw, "big") >> 12
+
+
+connection = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+rows = list(connection.execute("select id, time_created from session_v2 order by time_created"))
+
+print(f"{'id':36s} {'shape':6s} {'delta_ms':>9s} {'counter':>8s} {'rebuilt':8s}")
+bad = 0
+for session_id, created in rows:
+    shape_ok = bool(SHAPE.match(session_id))
+    decoded = decode(session_id)
+    delta = decoded - (created % (1 << 36))
+    counter = None
+    rebuilt = False
+    for candidate in range(created - 2000, created + 2000):
+        for value in range(1, 16):
+            if prefix_of(candidate, value) == session_id[4:16]:
+                counter, rebuilt = value, True
+                break
+        if rebuilt:
+            break
+    if not shape_ok or not rebuilt:
+        bad += 1
+    print(f"{session_id:36s} {'ok' if shape_ok else 'BAD':6s} {delta:>9d} "
+          f"{str(counter):>8s} {'yes' if rebuilt else 'NO':8s}")
+
+print(f"\n{len(rows)} sessions, {bad} mismatches")
+print("delta_ms is the id creation time minus the stored time_created;")
+print("the id is minted a moment before the row is written.")
+```
+
+Output:
+
+```
+id                                   shape   delta_ms  counter rebuilt
+ses_e9c9b9a99ffeZnhntAcw5CSMsA       ok           -42        1 yes
+ses_e9c880fc2ffeW3tNMJ6nNeVkPk       ok            -3        1 yes
+ses_e9c87299affeviwpykMZ6MOECl       ok         -1338        1 yes
+ses_e9c86ec24ffelDiUTEiymVy4tu       ok          -234        1 yes
+ses_e9c867bd3ffeY27mPPQrz9i3mQ       ok          -593        1 yes
+ses_e9c8643acffeYaELaM4Xfrgjqo       ok          -156        1 yes
+ses_e9c84ddf1ffev34wMLSmit10bD       ok          -543        1 yes
+ses_e9c80aa3effeG4MRBReaQKGchi       ok            -5        1 yes
+ses_e9c7d592dffeHPXjUnMnnCHUTh       ok          -322        1 yes
+
+9 sessions, 0 mismatches
+delta_ms is the id creation time minus the stored time_created;
+the id is minted a moment before the row is written.
 ```
 
 ## 8. Open questions
